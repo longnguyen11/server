@@ -1,9 +1,8 @@
 'use strict';
 
+const cors = require('cors');
 const express = require('express');
-const WebSocket = require('ws');
-const SocketServer = WebSocket.Server;
-const path = require('path');
+
 const AWS = require('aws-sdk');
 const config = require('./config/config.js');
 AWS.config.update(config.aws_remote_config);
@@ -18,19 +17,20 @@ const dataAttribute = {
   max: 'MaximumRange',
   data: 'RandomGenerateData'
 };
-const server = express()
-  .listen(PORT, () => console.log(`Listening on ${ PORT }`));
+const app = express();
+const server = app.listen(PORT, () => console.log(`Listening on ${ PORT }`));
 
-const wss = new SocketServer({ server });
-wss.on('connection', (ws) => {
-  // grab data from dynamo, send them over on connection
+app.use(cors());
+app.options('*', cors());
+app.get('/data', function (req, res, next) {
   docClient.scan({TableName : 'tree'}, (error, data) => {
-    if(error) {
-      ws.send(JSON.stringify(Object.assign({ type: 'error' }, error)));
-      return;
-    }
-    ws.send(JSON.stringify(data));
+    res.send(data);
+    next()
   })
+})
+const io = require('socket.io')(server);
+io.on('connection', (ws) => {
+  // grab data from dynamo, send them over on connection
   ws.on('message', function incoming(data) {
     let parsedData;
     try {
@@ -51,14 +51,22 @@ wss.on('connection', (ws) => {
         }
       }, (error) => {
         if(error) {
-          ws.send(JSON.stringify(Object.assign({ type: 'error' }, error)));
+          ws.emit('message', JSON.stringify(Object.assign({ type: 'error' }, error)));
           return;
         }
-        wss.clients.forEach(function each(client) {
-          if (client !== ws && client.readyState === WebSocket.OPEN) {
-            client.send(data);
-          }
-        });
+        ws.broadcast.emit('message', data);
+      });
+    } else if (parsedData.type === 'delete') {
+      docClient.delete({
+        TableName : 'tree',
+        Key:{
+          "UserName": parsedData.id,
+        },
+      }, function(err) {
+        if (err) {
+          console.error("Unable to delete item. Error JSON:", JSON.stringify(err, null, 2));
+        }
+        ws.broadcast.emit('delete', data);
       });
     } else {
       let temp = [];
@@ -83,23 +91,16 @@ wss.on('connection', (ws) => {
         ExpressionAttributeValues,
         ReturnValues:"UPDATED_NEW"
       };
-      console.log(params)
       docClient.update(params, (error, res) => {
-        console.log(error, res);
         if(error) {
-          ws.send(JSON.stringify(Object.assign({ type: 'error' }, error)));
+          ws.emit('message', JSON.stringify(Object.assign({ type: 'error' }, error)));
           return;
         }
-        wss.clients.forEach(function each(client) {
-          if (client !== ws && client.readyState === WebSocket.OPEN) {
-            client.send(data);
-          }
-        });
+        ws.broadcast.emit('message', data);
       });
     }
   });
   ws.on('close', function () {
-    console.log('deleted: ')
   })
 });
 
